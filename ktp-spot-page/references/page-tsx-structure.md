@@ -2,7 +2,7 @@
 
 ## Required Section Order
 
-Every spot page must include all 10 sections in this order:
+Every spot page must include all 13 sections in this order:
 
 ```
 1.  Hero                    id="hero"           — stats pills + tagline
