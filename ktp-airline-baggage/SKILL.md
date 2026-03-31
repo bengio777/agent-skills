@@ -282,9 +282,37 @@ AFTER LOOP:
 ### Expansion behavior
 When the agent identifies unscraped airlines in `LAYER_MAP`, it should:
 1. Research the airline's baggage policy URL (web search or known patterns)
-2. Add to `scrape_policies.py` AIRLINES list with best-guess `policy_urls`
-3. Run the full 4-step pipeline for the new airline
-4. Report back: airline added, rows inserted, any issues
+2. Add to `scrape_policies.py` AIRLINES list using the exact format below
+3. Add the IATA to `LAYER_MAP` in `verify_urls.py` under the correct layer
+4. Run the full 4-step pipeline for the new airline
+5. Report back: airline added, rows inserted, any issues
+
+### Airline entry format (`scrape_policies.py` AIRLINES list)
+
+```python
+# --- Layer N: [layer description] ---
+{
+    "iata": "XX",                        # 2-3 char IATA code, uppercase
+    "name": "Full Airline Name",         # Official name as used on their website
+    "loyalty_program": "Program Name",   # Set to None if no loyalty program
+    "policy_urls": [
+        "https://www.airline.com/en/baggage/checked-baggage",   # checked bag fees page
+        "https://www.airline.com/en/baggage/sports-equipment",  # sports/kite equipment page
+        # Add more URLs if fees are split across multiple pages
+    ],
+},
+```
+
+**URL discovery rules:**
+- Always include a checked baggage fee page AND a sports equipment page when both exist
+- Common URL patterns: `/baggage/`, `/travel-info/baggage`, `/en/baggage-fees`, `/help/baggage`
+- For help-center airlines (Ryanair, JetBlue, Southwest): use `help.airline.com` or `support.airline.com` URLs
+- Run `verify_urls.py --iata XX` immediately after adding — fix NOT_FOUND before any scraping
+- If the sports equipment URL doesn't exist, omit it (don't add a broken URL)
+
+**`loyalty_program` values by common pattern:**
+- Major US carriers: MileagePlus (UA), AAdvantage (AA), SkyMiles (DL), TrueBlue (B6), Rapid Rewards (WN)
+- Set to `None` for budget/LCC carriers with no loyalty program (FR, W6, F9, NK, etc.)
 
 ### Running the agent headlessly
 ```bash
