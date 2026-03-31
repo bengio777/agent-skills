@@ -32,6 +32,33 @@ Every airline in the database makes this calculation more accurate. Without bagg
 
 ---
 
+## 0. Pre-Run Reads (Always First)
+
+Before running any pipeline step or autonomous loop, read these two files:
+
+```bash
+cat data/canonical/index.json      # 71 complete, 7 pending with blockers
+cat data/verify-cache.json         # last verified date + URL status per airline
+```
+
+**index.json** tells you: which airlines are `complete`, which are `pending`, and what the specific blocker is for each pending airline (Imperva, 404, JS-render, manual-only, timeout). Do not attempt re-scraping pending airlines without reading their blocker first.
+
+**verify-cache.json** tells you: when each airline was last verified and the per-URL status. If `verified_date` is within 7 days, skip verify step.
+
+**Known pending blockers (as of Layer 5):**
+
+| IATA | Airline | Blocker |
+|------|---------|---------|
+| LA | LATAM | Imperva bot block — all scrape attempts empty |
+| AT | Royal Air Maroc | 404 — policy URL needs research |
+| AK | AirAsia | JS-rendered tables — extraction incomplete |
+| G9 | Air Arabia | PDF-only fees — manual write required |
+| MK | Air Mauritius | JS-expanded sections — manual write required |
+| WY | Oman Air | Phone-only fees — manual write required |
+| TC | Air Tanzania | 35s timeout — site may be unreachable |
+
+---
+
 ## 1. The 4-Step Pipeline
 
 Each step is a **hard gate**. Fix problems before advancing. Never skip a step.
@@ -138,11 +165,94 @@ Always run `verify_urls.py --broken` after adding subdomains to confirm the gap 
 
 ---
 
-## 5. Schema v2.2 — DB Enum Reference
+## 5. Schema v2.2 — Complete Field Reference
 
-These are the only valid enum values. Normalization from raw extraction to these enums
-happens in `seed_supabase.py` via `ROUTE_REGION_MAP` and `FEE_APPLIES_PER_MAP`.
-**Never change the extraction prompt to output these directly** — normalize at seed time.
+### Canonical JSON structure
+
+```json
+{
+  "meta": {
+    "airline_iata": "UA",
+    "airline_name": "United Airlines",
+    "loyalty_program": "MileagePlus",
+    "alliance": "Star Alliance",
+    "source_url": "https://www.united.com/en/us/fly/baggage.html",
+    "last_verified": "2026-03-27",
+    "source_quality": "official",
+    "notes": "Optional free-text notes"
+  },
+  "airline_bag_fees": [ ... ],
+  "airline_sports_fees": [ ... ],
+  "kit_weight_profiles": [ ... ]
+}
+```
+
+### airline_bag_fees fields (BAG_FEE_FIELDS)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `airline_iata` | str | 2-3 char IATA code |
+| `airline_name` | str | Full airline name |
+| `loyalty_program` | str | Program name or null |
+| `loyalty_tier` | str | e.g. "standard", "silver", "gold", "elite" |
+| `alliance_tier_required` | str | e.g. "Star Alliance Gold" or null |
+| `fare_class` | str | e.g. "economy", "business", "first" |
+| `route_region` | str | DB enum (see below) |
+| `allowance_concept` | str | "piece" or "weight" |
+| `free_bags_included` | int | Defaults to 0 — NOT NULL |
+| `weight_limit_kg` | float | Per-bag weight limit |
+| `size_limit_cm` | str | e.g. "158cm linear" |
+| `fee_bag_1` | float | First checked bag fee |
+| `fee_bag_2` | float | Second checked bag fee |
+| `fee_bag_3plus` | float | Third+ bag fee |
+| `fee_currency` | str | ISO currency code |
+| `fee_applies_per` | str | "segment" or "journey" |
+| `advance_discount_amount` | float | Online booking discount |
+| `source_quality` | str | "official", "inferred", "aggregator" |
+| `source_url` | str | Page URL |
+| `last_verified` | str | ISO date |
+| `notes` | str | Free-text |
+
+### airline_sports_fees fields (SPORTS_FEE_FIELDS)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `airline_iata` | str | |
+| `bag_type` | str | DB enum (see below) |
+| `route_region` | str | DB enum |
+| `loyalty_tier` | str | |
+| `alliance_tier_required` | str | |
+| `is_free` | bool | True if no surcharge |
+| `is_additive_to_checked_bag_fee` | bool | True if paid on top of normal bag fee |
+| `surcharge_amount` | float | |
+| `surcharge_currency` | str | |
+| `oversize_fee_amount` | float | |
+| `oversize_fee_waived` | bool | |
+| `overweight_fee_amount` | float | |
+| `overweight_fee_per_kg` | float | |
+| `weight_limit_kg` | float | |
+| `size_limit_cm` | str | |
+| `max_weight_kg` | float | |
+| `max_length_cm` | float | |
+| `fee_applies_per` | str | "segment" or "journey" |
+| `advance_booking_required` | bool | |
+| `advance_booking_hours` | int | |
+| `advance_discount_amount` | float | |
+| `promotion_expires` | str | ISO date |
+| `alternate_sport_categories` | str | |
+| `alternate_surcharge_amount` | float | |
+| `alternate_surcharge_currency` | str | |
+| `alternate_route_region` | str | |
+| `customer_coaching` | str | Key advice for kite travelers |
+| `alliance_waiver_applies` | bool | |
+| `applies_to_iata_exceptions` | str | |
+| `exception_description` | str | |
+| `source_quality` | str | |
+| `source_url` | str | |
+| `last_verified` | str | |
+| `notes` | str | |
+
+### DB Enum Reference
 
 | Column | Valid values |
 |--------|-------------|
@@ -156,10 +266,58 @@ happens in `seed_supabase.py` via `ROUTE_REGION_MAP` and `FEE_APPLIES_PER_MAP`.
 - `airline_sports_fees` → key: `(airline_iata, bag_type, route_region, loyalty_tier)`
 - `kit_weight_profiles` → key: `profile_name`
 
-**Key normalization rules:**
+---
+
+## 6. Normalization Rules
+
+### ROUTE_REGION_MAP (complete — 27 entries as of Layer 5)
+
+When seeding fails with an enum error, add to this map in `seed_supabase.py`. **Never change the extraction prompt to output DB enums directly** — normalize at seed time.
+
+```python
+ROUTE_REGION_MAP = {
+    "international":               "intercontinental",
+    "intra-regional":              "intercontinental",
+    "global":                      "intercontinental",
+    "intra-asia":                  "intercontinental",
+    "japan-europe":                "intercontinental",
+    "long-haul-caribbean-africa-asia": "intercontinental",
+    "long-haul-indian-ocean":      "intercontinental",
+    "long-haul-other":             "intercontinental",
+    "intra-pacific":               "transpacific",
+    "south-pacific":               "transpacific",
+    "transatlantic-main":          "transatlantic",
+    "north-america":               "intra-domestic",
+    "intra-us-canada":             "intra-domestic",
+    "intra-hawaii":                "intra-domestic",
+    "intra-turkey":                "intra-domestic",
+    "intra-latam":                 "us-latin-america",
+    "latin-caribbean":             "us-latin-america",
+    "north-america-latam":         "us-latin-america",
+    "intra-africa":                "middle-east-africa",
+    "middle-east":                 "middle-east-africa",
+    "africa":                      "middle-east-africa",
+    "intra-middle-east":           "middle-east-africa",
+    "asia-me":                     "middle-east-africa",
+    "intra-european":              "intra-europe",
+    "intra-spain-balearics":       "intra-europe",
+    "canary-islands-europe-africa": "intra-europe",
+    "canary-islands-europe-me":    "intra-europe",
+}
+```
+
+### FEE_APPLIES_PER_MAP
+
+```python
+FEE_APPLIES_PER_MAP = {
+    "sector": "segment",   # Virgin Australia pattern
+    # "flight" is a likely future variant — add if encountered
+}
+```
+
+### Other normalization rules
 - `free_bags_included` defaults to `0` if null (NOT NULL constraint)
-- `fee_applies_per`: `"sector"` → `"segment"` (Virgin Australia pattern — add to `FEE_APPLIES_PER_MAP`)
-- When seeding fails with an enum error → add new mapping to `ROUTE_REGION_MAP`, don't change the extraction prompt
+- When seeding fails with an enum error → add to `ROUTE_REGION_MAP`, don't change extraction prompt
 
 **Verify after seeding:**
 ```sql
@@ -168,7 +326,26 @@ SELECT airline_iata, COUNT(*) FROM airline_bag_fees GROUP BY airline_iata ORDER 
 
 ---
 
-## 6. Layer History & Coverage
+## 7. Alliance Waiver Patterns
+
+Sports equipment fees are waived for elite alliance members on many airlines. The extraction prompt handles this but the agent should validate alliance waiver data against these patterns:
+
+| Alliance Tier | Applies To | What's Waived |
+|---------------|-----------|---------------|
+| Oneworld Emerald | AA, BA, IB, JL, QF, QR, EY, A3 | First sports bag free |
+| Star Alliance Gold | LH, UA, TK, NH, LX, OS, AY, SQ, ET, AC, TP, AI | Sports fees waived |
+| SkyTeam Elite Plus | DL, AF, KL, AM, AZ, SK, KE, AT, KQ, LA, UX, G3 | Sports fees waived |
+
+When `alliance_waiver_applies: true` is set, `alliance_tier_required` should be populated with the specific tier string (e.g., `"Star Alliance Gold"`).
+
+**Alliance map** (for `ALLIANCE_MAP` in `process_canonical.py`):
+- Star Alliance: LX, OS, AY, AC, AV, MS, AI, SQ, NH, LH, TK, TP, UA, ET
+- SkyTeam: DL, AF, KL, AM, AZ, UX, G3, SK, KE, AT, KQ, LA
+- Oneworld: BA, IB, AK, QF, AA, JL, QR, EY, A3
+
+---
+
+## 8. Layer History & Coverage
 
 | Layer | Airlines | Count | Notes |
 |-------|----------|-------|-------|
@@ -181,14 +358,9 @@ SELECT airline_iata, COUNT(*) FROM airline_bag_fees GROUP BY airline_iata ORDER 
 
 **Total coverage: 74 airlines across 6 layers** (Layer 6 not yet scraped).
 
-**Alliance map** (for `ALLIANCE_MAP` in `process_canonical.py`):
-- Star Alliance: LX, OS, AY, AC, AV, MS, AI, SQ, NH, LH, TK, TP, UA, ET
-- SkyTeam: DL, AF, KL, AM, AZ, UX, G3, SK, KE, AT, KQ, LA
-- Oneworld: BA, IB, AK, QF, AA, JL, QR, EY, A3
-
 ---
 
-## 7. Known Data Gaps
+## 9. Known Data Gaps
 
 | IATA | Airline | Fix | Reason |
 |------|---------|-----|--------|
@@ -215,7 +387,27 @@ python seed_supabase.py --iata BW
 
 ---
 
-## 8. Adding a New Layer — Checklist
+## 10. Scraper Implementation Details
+
+Understanding these helps diagnose empty raw files:
+
+- **Page wait strategy**: networkidle first; falls back to `load` if networkidle times out (common on SPA sites)
+- **Scrape timeout**: 35 seconds per airline (raised from default for slow sites)
+- **Post-load wait**: 6 seconds after page load for JS-heavy sites
+- **Delay between URLs**: 1500ms between each URL in an airline's `policy_urls` list
+- **Bot evasion**: `--disable-blink-features=AutomationControlled` flag applied to all Playwright launches
+- **Empty file detection**: after scraping, check `data/raw/{iata}-*.json` file size — files under 200 bytes are effectively empty
+
+**Diagnosing empty raw files:**
+1. File exists but is tiny → page loaded but tables didn't render → try `--no-headless` then `--wait 5`
+2. No file created → scraper threw an error → check terminal output for traceback
+3. File has content but extraction produces 0 rows → JS-rendered content not captured → classify MANUAL
+
+**split_canonical.py warning**: This is a one-time migration utility that splits legacy combined canonical files into per-airline files. Do NOT run it again — it would corrupt current data by re-splitting already-correct files.
+
+---
+
+## 11. Adding a New Layer — Checklist
 
 1. Draft airline entries in `scrape_policies.py` with best-guess `policy_urls`
 2. Add layer to `LAYER_MAP` in `verify_urls.py` (keep in sync)
@@ -243,7 +435,7 @@ Layer 5 window allocation: W1: DL AC KL BA VS AF LX OS AZ SK · W2: AY DY W6 EW 
 
 ---
 
-## 9. Autonomous Agent Mode
+## 12. Autonomous Agent Mode
 
 The baggage pipeline is designed to run as a fully autonomous agent — no human in the loop
 required for routine refreshes and layer expansion.
@@ -256,14 +448,19 @@ required for routine refreshes and layer expansion.
 ### Agent execution loop
 
 ```
+BEFORE LOOP:
+  - Read data/canonical/index.json — note pending airlines and their blockers
+  - Read data/verify-cache.json — note last_verified dates per airline
+
 FOR each airline in coverage_list WHERE last_verified > 7 days OR status = pending:
+  - IF airline is in known MANUAL blockers (G9, MK, WY, TC) → skip, log
   1. verify_urls.py --iata XX
      - OK → proceed to scrape
      - BOT_BLOCK → scrape with --no-headless
      - NOT_FOUND → research new URL via web search, update policy_urls, retry
      - TIMEOUT/ERROR → log as gap, skip this run
   2. scrape_policies.py --iata XX [--no-headless if BOT_BLOCK]
-     - Check data/raw/{iata}-*.json is non-empty
+     - Check data/raw/{iata}-*.json is non-empty (>200 bytes)
      - If empty → retry with --wait 5; if still empty → classify MANUAL
   3. process_canonical.py --iata XX
      - Write data/canonical/{IATA}-baggage-intelligence.json
@@ -314,6 +511,16 @@ When the agent identifies unscraped airlines in `LAYER_MAP`, it should:
 - Major US carriers: MileagePlus (UA), AAdvantage (AA), SkyMiles (DL), TrueBlue (B6), Rapid Rewards (WN)
 - Set to `None` for budget/LCC carriers with no loyalty program (FR, W6, F9, NK, etc.)
 
+**After adding any airline entry:**
+- Add IATA to `LAYER_MAP` in `verify_urls.py` under the correct layer number
+- Run `verify_urls.py --iata XX` to confirm URL is reachable before scraping
+
+### Per-airline inline comments
+`scrape_policies.py` has inline comments on every airline documenting: kite spot relevance,
+piece vs weight allowance concept, alliance tier, known bot behavior, and special URL notes.
+Read these comments before scraping or researching an airline — they encode field-tested knowledge
+from prior scrape sessions.
+
 ### Running the agent headlessly
 ```bash
 claude -p "Run the KTP airline baggage agent. Working directory: /Users/benjamingiordano/Projects/kite-the-planet. Run the full autonomous pipeline loop for all airlines where last_verified > 7 days. Use the ktp-airline-baggage skill for rules. Report coverage summary when done."
@@ -324,10 +531,11 @@ claude -p "Run the KTP airline baggage agent. Working directory: /Users/benjamin
 - Change DB enum definitions in `seed_supabase.py` without flagging for human review
 - Add more than one new layer in a single run (avoid uncontrolled expansion)
 - Modify `PIPELINE.md` (this is a human-reviewed source of truth)
+- Attempt MANUAL-only airlines (G9, MK, WY, TC) — these require human data collection
 
 ---
 
-## 10. Secrets & Environment
+## 13. Secrets & Environment
 
 Both layers of secrets required:
 ```bash
@@ -339,4 +547,12 @@ Loading pattern in scripts:
 ```python
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # shared tools/.env
 load_dotenv()  # tool-specific (additive)
+```
+
+**Python package requirements:**
+```
+anthropic>=0.86.0
+playwright>=1.44.0
+python-dotenv>=1.0.0
+supabase>=2.0.0
 ```
